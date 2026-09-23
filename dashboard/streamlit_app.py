@@ -92,10 +92,21 @@ st.markdown(
     """
     <div class="uac-intro">
         <div class="eyebrow">What this dashboard does</div>
-        This dashboard gives a centralized, real-time view of the UAC Program's
-        CBP–HHS care pipeline: total system load, intake/discharge balance,
-        sustained capacity strain, and volatility — built for staffing and
-        shelter planning decisions.
+        <div style="font-weight:700; font-size:1.05rem; margin-bottom:6px;">
+            System Capacity and Care Load Analytics for the Unaccompanied Alien
+            Children (UAC) Program: A Data-Driven Framework for Healthcare
+            Pipeline Monitoring
+        </div>
+        The Unaccompanied Alien Children (UAC) Program is a federally mandated
+        pipeline in which minors apprehended by U.S. Customs and Border
+        Protection (CBP) are transferred into the care of the Department of
+        Health and Human Services (HHS) for shelter, medical screening, and
+        eventual placement with sponsors. This dashboard translates daily
+        CBP–HHS reporting data into four capacity indicators — Total System
+        Load, Net Daily Flow, Care Load Volatility, and the Discharge Offset
+        Ratio — and uses rolling-window analysis to identify sustained periods
+        of capacity strain, supporting situational awareness for staffing and
+        shelter planning.
     </div>
     """,
     unsafe_allow_html=True,
