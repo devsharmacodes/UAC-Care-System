@@ -1,37 +1,110 @@
 """
-System Capacity & Care Load Analytics — Streamlit Dashboard
+System Capacity & Care Load Analytics — Premium Streamlit Dashboard
 Unaccompanied Alien Children (UAC) Program
 
 Run with:  streamlit run dashboard/streamlit_app.py
-(run this command from the project root, so the relative data path resolves)
+(run from the project root so the relative data path and the
+`theme` / `components` / `src.metrics` imports all resolve)
+
+Note on scope: Streamlit is a server-rendered Python app, not a
+client-side SPA. True URL routing, localStorage, and JS page
+transitions aren't natively available -- this file uses the closest
+Streamlit-native equivalents (session_state view switching, query-param
+theme persistence, CSS-only tooltips/animations) rather than faking
+them with brittle workarounds.
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# Allow importing src/metrics.py when running from the app/ folder
+sys.path.append(str(Path(__file__).resolve().parent))
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from theme import inject_css, get_theme, toggle_theme, palette
+from components import (
+    kpi_card, kpi_skeleton_row, trend_line_chart, comparison_bar_chart,
+    donut_chart, area_chart, data_table, activity_feed, insights_list,
+)
 from src.metrics import load_and_prepare, resample_to, early_late_comparison
 
 
-# ---------------------------------------------------------------
+# =================================================================
 # Page setup
-# ---------------------------------------------------------------
-st.set_page_config(
-    page_title="UAC System Capacity & Care Load Analytics",
-    layout="wide",
+# =================================================================
+st.set_page_config(page_title="UAC Capacity Analytics", page_icon="🛡️", layout="wide")
+inject_css()
+p = palette()
+
+NAV_ITEMS = [
+    ("Dashboard", "🏠", "Overview of system load, KPIs, and current status."),
+    ("Analytics", "📊", "Deeper trend, comparison, and volatility analysis."),
+    ("Data", "🗂️", "Search, sort, and export the underlying daily records."),
+    ("Reports", "📄", "Early vs. late period comparison and summary export."),
+    ("Activity", "🕒", "Timeline of strain-window and load-state events."),
+    ("Settings", "⚙️", "Theme and display preferences."),
+]
+if "nav" not in st.session_state:
+    st.session_state.nav = "Dashboard"
+
+
+# =================================================================
+# Sidebar navigation
+# =================================================================
+with st.sidebar:
+    st.markdown("### 🛡️ UAC Analytics")
+    st.caption("Capacity & care load monitoring")
+    st.write("")
+    for name, icon, desc in NAV_ITEMS:
+        active = st.session_state.nav == name
+        if st.button(
+            f"{icon}  {name}", key=f"nav_{name}", use_container_width=True,
+            type="primary" if active else "secondary", help=desc,
+        ):
+            st.session_state.nav = name
+            st.rerun()
+    st.write("")
+    st.divider()
+    st.caption("Data: HHS UAC Program daily reporting")
+
+page = st.session_state.nav
+
+
+# =================================================================
+# Header
+# =================================================================
+head_l, head_r = st.columns([5, 1])
+with head_l:
+    st.markdown(f"## {dict((n, i) for n, i, _ in NAV_ITEMS)[page]}  {page}")
+with head_r:
+    st.write("")
+    if st.button(
+        "🌙 Dark" if get_theme() == "light" else "☀️ Light",
+        use_container_width=True, help="Switch between light and dark mode. Your choice is saved in the page URL.",
+    ):
+        toggle_theme()
+        st.rerun()
+
+st.markdown(
+    """
+    <div class="uac-intro">
+        <div class="eyebrow">What this dashboard does</div>
+        This dashboard gives a centralized, real-time view of the UAC Program's
+        CBP–HHS care pipeline: total system load, intake/discharge balance,
+        sustained capacity strain, and volatility — built for staffing and
+        shelter planning decisions.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.title("System Capacity & Care Load Analytics")
-st.caption("Unaccompanied Alien Children (UAC) Program — CBP & HHS pipeline")
 
-
-# ---------------------------------------------------------------
-# Data loading (cached so it doesn't reload on every interaction)
-# ---------------------------------------------------------------
+# =================================================================
+# Data loading (cached; skeleton shown only on the true first load)
+# =================================================================
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "cleaned_data" / "sorted_data.csv"
 
 
@@ -41,152 +114,211 @@ def get_data(path):
 
 
 if not DATA_PATH.exists():
-    st.error(
-        f"Couldn't find the data file at `{DATA_PATH}`. "
-        "Make sure `cleaned_data.csv` is in `data/cleaned_data/` at the project root."
-    )
+    st.error(f"Couldn't find the data file at `{DATA_PATH}`.")
     st.stop()
 
-df = get_data(DATA_PATH)
+if "warm" not in st.session_state:
+    kpi_skeleton_row(5)
+    time.sleep(0.35)  # first-load only; subsequent reruns hit the cache instantly
+    st.session_state.warm = True
+
+try:
+    df = get_data(DATA_PATH)
+except Exception as e:
+    st.error(f"Failed to load or process the data file: {e}")
+    st.stop()
 
 
-# ---------------------------------------------------------------
-# Sidebar — user controls
-# ---------------------------------------------------------------
-st.sidebar.header("Filters")
+# =================================================================
+# Global filters (shown on every page except Settings)
+# =================================================================
+if page != "Settings":
+    f1, f2, f3 = st.columns([2, 1.4, 2])
+    with f1:
+        min_date, max_date = df.index.min().date(), df.index.max().date()
+        date_range = st.date_input("Date range", value=(min_date, max_date),
+                                    min_value=min_date, max_value=max_date)
+    with f2:
+        granularity = st.radio("Granularity", ["Daily", "Weekly", "Monthly"], horizontal=True)
+    with f3:
+        st.write("")
 
-min_date, max_date = df.index.min().date(), df.index.max().date()
-date_range = st.sidebar.date_input(
-    "Date range",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date,
-)
+    if len(date_range) == 2:
+        start, end = date_range
+        filtered = df[(df.index.date >= start) & (df.index.date <= end)]
+    else:
+        st.info("Pick an end date to apply the range filter.")
+        filtered = df.copy()
 
-granularity = st.sidebar.radio(
-    "Time granularity",
-    options=["Daily", "Weekly", "Monthly"],
-    index=0,
-)
-freq_map = {"Daily": "D", "Weekly": "W", "Monthly": "ME"}
+    if filtered.empty:
+        st.warning("No data in the selected range. Widen it above.")
+        st.stop()
 
-metric_options = st.sidebar.multiselect(
-    "Metrics to show on the load chart",
-    options=["CBP Custody load", "HHS Care load", "Total System Load"],
-    default=["HHS Care load", "CBP Custody load"],
-)
-
-show_strain = st.sidebar.checkbox("Highlight sustained strain windows", value=True)
-
-# Apply date filter
-if len(date_range) == 2:
-    start, end = date_range
-    filtered = df[(df.index.date >= start) & (df.index.date <= end)]
-else:
-    filtered = df.copy()
-
-resampled = resample_to(filtered, freq_map[granularity])
+    freq_map = {"Daily": "D", "Weekly": "W", "Monthly": "ME"}
+    resampled = resample_to(filtered, freq_map[granularity])
+    monthly = resample_to(filtered, "ME")
+    st.divider()
 
 
-# ---------------------------------------------------------------
-# KPI Summary Cards
-# ---------------------------------------------------------------
-st.subheader("KPI Summary")
+# =================================================================
+# PAGE: Dashboard
+# =================================================================
+if page == "Dashboard":
+    cols = st.columns(5)
+    avg_load = filtered["total_system_load"].mean()
+    strain_days = int(filtered["in_strain_window"].sum())
+    transferred = filtered["transferred_out"].sum()
+    offset_ratio = filtered["discharged"].sum() / transferred if transferred > 0 else float("nan")
+    growth = filtered["hhs_load_growth_rate"].mean()
+    active_backlog = filtered["hhs_backlog_accum"].iloc[-1]
 
-col1, col2, col3, col4 = st.columns(4)
+    with cols[0]:
+        kpi_card("Total Records", f"{len(filtered):,}", "Number of daily records in the selected range.")
+    with cols[1]:
+        kpi_card("Active Users", f"{filtered['hhs_load'].iloc[-1]:,.0f}",
+                  "Children currently active in HHS care as of the last day in range.")
+    with cols[2]:
+        kpi_card("Performance", f"{offset_ratio:.2f}",
+                  "Discharge Offset Ratio: discharged ÷ transferred-in. ≥1.0 means the system kept pace.",
+                  delta=f"{'Above' if offset_ratio >= 1 else 'Below'} break-even", delta_good=offset_ratio >= 1)
+    with cols[3]:
+        kpi_card("Growth", f"{growth:+.2f}%",
+                  "Average day-over-day % change in HHS care load over the selected range.",
+                  delta="rising" if growth > 0 else "falling", delta_good=growth <= 0)
+    with cols[4]:
+        kpi_card("Recent Activity", f"{strain_days} strain days",
+                  "Days inside a sustained strain window (5+ consecutive days of positive net intake).",
+                  delta=f"backlog {active_backlog:,.0f}", delta_good=active_backlog == 0)
 
-avg_total_load = filtered['total_system_load'].mean()
-strain_days = int(filtered['in_strain_window'].sum())
-strain_pct = filtered['in_strain_window'].mean() * 100 if len(filtered) else 0
-avg_offset_ratio = (
-    filtered['discharged'].sum() / filtered['transferred_out'].sum()
-    if filtered['transferred_out'].sum() > 0 else float('nan')
-)
-avg_volatility = filtered['hhs_load_volatility'].mean()
+    st.write("")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.plotly_chart(
+            trend_line_chart(resampled, "total_system_load", "Total System Load — Trend", p["accent"]),
+            use_container_width=True,
+        )
+    with c2:
+        st.plotly_chart(
+            donut_chart(
+                ["CBP Custody", "HHS Care"],
+                [resampled["cbp_load"].mean(), resampled["hhs_load"].mean()],
+                "Load Distribution", [p["warning"], p["accent"]],
+            ),
+            use_container_width=True,
+        )
 
-col1.metric("Avg Total System Load", f"{avg_total_load:,.0f}")
-col2.metric("Strain Days", f"{strain_days:,}", help="Days inside a sustained strain window (5+ consecutive stress days)")
-col3.metric("Discharge Offset Ratio", f"{avg_offset_ratio:.2f}", help="Discharged ÷ Transferred-in. ≥1.0 means the system kept pace.")
-col4.metric("Avg Care Load Volatility", f"{avg_volatility:,.1f}", help="7-day rolling standard deviation of HHS load")
+    st.write("")
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("##### Insights")
+        insights_list(filtered, monthly)
+    with c4:
+        st.markdown("##### Recent Activity")
+        activity_feed(filtered)
 
 
-# ---------------------------------------------------------------
-# System Load Overview Pane
-# ---------------------------------------------------------------
-st.subheader("System Load Overview")
+# =================================================================
+# PAGE: Analytics
+# =================================================================
+elif page == "Analytics":
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(
+            trend_line_chart(resampled, "hhs_load", "HHS Care Load", p["accent"]),
+            use_container_width=True,
+        )
+    with c2:
+        st.plotly_chart(
+            trend_line_chart(resampled, "cbp_load", "CBP Custody Load", p["warning"]),
+            use_container_width=True,
+        )
 
-chart_df = pd.DataFrame(index=resampled.index)
-if "CBP Custody load" in metric_options:
-    chart_df["CBP Custody load"] = resampled["cbp_load"]
-if "HHS Care load" in metric_options:
-    chart_df["HHS Care load"] = resampled["hhs_load"]
-if "Total System Load" in metric_options:
-    chart_df["Total System Load"] = resampled["total_system_load"]
-
-if not chart_df.empty:
-    st.line_chart(chart_df)
-else:
-    st.info("Select at least one metric in the sidebar to show the chart.")
-
-if show_strain and granularity == "Daily":
-    strain_days_list = filtered.index[filtered['in_strain_window']]
-    if len(strain_days_list) > 0:
-        st.caption(
-            f"⚠️ {len(strain_days_list)} day(s) in the selected range fall inside a sustained strain window "
-            f"(first: {strain_days_list.min().date()}, last: {strain_days_list.max().date()})."
+    if granularity == "Monthly" and "discharge_offset_ratio" in resampled.columns:
+        st.plotly_chart(
+            comparison_bar_chart(resampled, "discharge_offset_ratio",
+                                  "Monthly Discharge Offset Ratio", threshold=1.0),
+            use_container_width=True,
         )
     else:
-        st.caption("✅ No sustained strain windows in the selected range.")
+        st.info("Switch to Monthly granularity to see the Discharge Offset Ratio comparison chart.")
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.plotly_chart(
+            area_chart(resampled, "hhs_backlog_accum", "Backlog Accumulation", p["danger"]),
+            use_container_width=True,
+        )
+    with c4:
+        st.plotly_chart(
+            trend_line_chart(filtered.resample("W").mean(numeric_only=True), "hhs_load_volatility",
+                              "Care Load Volatility (weekly avg)", p["success"]),
+            use_container_width=True,
+        )
 
 
-# ---------------------------------------------------------------
-# CBP vs HHS Load Comparison
-# ---------------------------------------------------------------
-st.subheader("CBP vs HHS Load Comparison")
-st.line_chart(resampled[["cbp_load", "hhs_load"]].rename(
-    columns={"cbp_load": "CBP Custody", "hhs_load": "HHS Care"}
-))
+# =================================================================
+# PAGE: Data
+# =================================================================
+elif page == "Data":
+    st.markdown("##### Daily Records")
+    data_table(filtered, key_prefix="daily")
 
 
-# ---------------------------------------------------------------
-# Net Intake & Backlog Trends
-# ---------------------------------------------------------------
-st.subheader("Net Intake & Backlog Trends")
-
-left, right = st.columns(2)
-
-with left:
-    st.markdown("**Discharge Offset Ratio** (discharged ÷ transferred-in)")
-    if granularity == "Monthly" and "discharge_offset_ratio" in resampled.columns:
-        st.bar_chart(resampled["discharge_offset_ratio"])
-        st.caption("Values ≥ 1.0 mean discharges kept pace with arrivals that period.")
+# =================================================================
+# PAGE: Reports
+# =================================================================
+elif page == "Reports":
+    st.markdown("##### Early vs. Late Period Comparison")
+    if len(monthly) >= 4:
+        comparison, early_label, late_label = early_late_comparison(monthly)
+        st.caption(f"Early period: {early_label}  |  Late period: {late_label}")
+        st.dataframe(comparison.style.format("{:.2f}"), use_container_width=True)
     else:
-        st.info("Switch to Monthly granularity in the sidebar to see the Discharge Offset Ratio trend.")
+        st.info("Select a wider date range (at least a few months) to generate this report.")
 
-with right:
-    st.markdown("**Sustained strain days per period**")
-    if "in_strain_window" in resampled.columns:
-        st.bar_chart(resampled["in_strain_window"])
-    else:
-        st.line_chart(filtered["in_strain_window"].astype(int))
+    st.write("")
+    st.download_button(
+        "⬇️ Download filtered data as CSV",
+        data=filtered.to_csv().encode("utf-8"),
+        file_name="uac_filtered_data.csv",
+        mime="text/csv",
+    )
 
 
-# ---------------------------------------------------------------
-# Early vs Late comparison (only meaningful with enough monthly data)
-# ---------------------------------------------------------------
-st.subheader("Early vs Late Period Comparison")
+# =================================================================
+# PAGE: Activity
+# =================================================================
+elif page == "Activity":
+    st.markdown("##### Full Activity Timeline")
+    activity_feed(filtered, max_items=30)
 
-monthly_full = resample_to(filtered, "ME")
-if len(monthly_full) >= 4:
-    comparison, early_label, late_label = early_late_comparison(monthly_full)
-    st.caption(f"Early period: {early_label}  |  Late period: {late_label}")
-    st.dataframe(comparison.style.format("{:.2f}"), use_container_width=True)
-else:
-    st.info("Select a wider date range (at least a few months) to see the early vs. late comparison.")
+
+# =================================================================
+# PAGE: Settings
+# =================================================================
+elif page == "Settings":
+    st.markdown("##### Display Preferences")
+    st.write(f"Current theme: **{get_theme().title()}**")
+    st.caption(
+        "Theme is stored in this page's URL (`?theme=...`), so bookmarking or "
+        "refreshing the same link keeps your preference. Streamlit apps don't "
+        "have access to the browser's localStorage without a custom JS component."
+    )
+    if st.button("Toggle theme"):
+        toggle_theme()
+        st.rerun()
+
+    st.write("")
+    st.markdown("##### About")
+    st.caption(
+        "UAC System Capacity & Care Load Analytics — built on a shared "
+        "`src/metrics.py` module so the dashboard, notebooks, and any future "
+        "reports stay numerically consistent."
+    )
 
 
 st.divider()
 st.caption(
-    "Data source: HHS Unaccompanied Alien Children Program daily reporting. "
-    "Net flow convention: outflow − inflow (negative = stress, positive = relief)."
+    "Net intake convention: inflow − outflow (positive = pressure/stress, negative = relief). "
+    "Sample UI data derived directly from the HHS reporting dataset — no synthetic records."
 )
