@@ -27,33 +27,49 @@ def load_and_prepare(csv_path):
     df['total_system_load'] = df['cbp_load'] + df['hhs_load']
 
     # Problem Statement 2: Balance between inflow and outflow
-    # (outflow - inflow convention: negative = stress, positive = relief)
-    df['cbp_net_change'] = df['transferred_out'] - df['apprehended']
-    df['hhs_net_flow'] = df['discharged'] - df['transferred_out']
+    # Sign convention (matches project spec): Net Intake = inflow - outflow.
+    # Positive  = intake outpacing outflow -> building pressure ("Stress").
+    # Negative  = outflow outpacing intake -> load draining  ("Relief").
+    df['cbp_net_intake'] = df['apprehended'] - df['transferred_out']
+    df['hhs_net_intake'] = df['transferred_out'] - df['discharged']
 
     # Problem Statement 3: daily stress/relief status
-    df['cbp_status'] = _daily_status(df['cbp_net_change'])
-    df['hhs_status'] = _daily_status(df['hhs_net_flow'])
+    df['cbp_status'] = _daily_status(df['cbp_net_intake'])
+    df['hhs_status'] = _daily_status(df['hhs_net_intake'])
 
     # Rolling averages & volatility
     df['hhs_load_7d_avg'] = df['hhs_load'].rolling(7, min_periods=1).mean()
     df['hhs_load_14d_avg'] = df['hhs_load'].rolling(14, min_periods=1).mean()
     df['hhs_load_volatility'] = df['hhs_load'].rolling(7, min_periods=1).std()
 
-    # Sustained strain windows (5+ consecutive stress days)
-    df['in_strain_window'] = _flag_runs(df['hhs_net_flow'] < 0, min_run_days=5)
+    # Care Load Growth Rate: day-over-day % change in HHS care load
+    df['hhs_load_growth_rate'] = df['hhs_load'].pct_change() * 100
+
+    # Sustained strain windows (5+ consecutive days of positive net intake,
+    # i.e. intake consistently outpacing discharge)
+    df['in_strain_window'] = _flag_runs(df['hhs_net_intake'] > 0, min_run_days=5)
 
     # Sustained high-load periods (75th percentile threshold, 5+ day run)
     threshold = df['hhs_load'].quantile(0.75)
     df['sustained_high_load'] = _flag_runs(df['hhs_load'] > threshold, min_run_days=5)
 
+    # Backlog Accumulation: running total of positive net intake, reset to
+    # zero every time the system returns to relief (net intake <= 0).
+    # Captures HOW MUCH backlog has built up during the current pressure
+    # streak, not just whether a streak is happening.
+    positive_intake = df['hhs_net_intake'].where(df['hhs_net_intake'] > 0, 0.0)
+    relief_reset = (df['hhs_net_intake'] <= 0).cumsum()
+    df['hhs_backlog_accum'] = positive_intake.groupby(relief_reset).cumsum()
+
     return df
 
 
 def _daily_status(net_series):
-    """Relief / Stress / No Data per day, NaN-safe."""
+    """Relief / Stress / No Data per day, NaN-safe.
+    net_series follows the intake-minus-outflow convention, so:
+    positive = Stress (backlog building), negative/zero = Relief."""
     return net_series.apply(
-        lambda v: "No Data" if pd.isna(v) else ("Relief" if v >= 0 else "Stress")
+        lambda v: "No Data" if pd.isna(v) else ("Stress" if v > 0 else "Relief")
     )
 
 
@@ -78,6 +94,8 @@ def resample_to(df, freq):
         'hhs_load': 'last',
         'cbp_load': 'last',
         'total_system_load': 'last',
+        'hhs_net_intake': 'mean',
+        'hhs_backlog_accum': 'last',
         'in_strain_window': 'sum',
         'sustained_high_load': 'sum',
     })
